@@ -1,9 +1,7 @@
 /* Arduino NCR5380 Library
  * Copyright 2020 Edward Halferty
+ * Portions of this file copied from Linux source, copyright Linus Torvalds and many others
 */
-
-// NCRduino
-// ADBtooth
 
 #include "ncr5380.h"
 
@@ -68,6 +66,47 @@ bool NCR5380::arbitrate() {
   }
   //After/during arbitration, BSY should be asserted.
   NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_SEL | ICR_ASSERT_BSY);
+  if (loggingEnabled) { Serial.print("Won arbitration\n"); }
+  delay(1);
+  return true;
+}
+
+// Should be called right after arbitrate()
+bool NCR5380::select(int targetId) {
+  //Start selection process, asserting the host and target ID's on the SCSI bus
+  NCR5380_write(OUTPUT_DATA_REG, ID_MASK | (1 << targetId));
+  //Raise ATN while SEL is true before BSY goes false from arbitration, since this is the only way to guarantee that
+  //we'll get a MESSAGE OUT phase immediately after selection.
+  NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_BSY | ICR_ASSERT_DATA | ICR_ASSERT_ATN | ICR_ASSERT_SEL);
+  NCR5380_write(MODE_REG, 0);
+  //Reselect interrupts must be turned off prior to the dropping of BSY, otherwise we will trigger an interrupt.
+  NCR5380_write(SELECT_ENABLE_REG, 0);
+  delay(1);
+  //Reset BSY
+  NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_DATA | ICR_ASSERT_ATN | ICR_ASSERT_SEL);
+  delay(1);
+  if (loggingEnabled) { Serial.print("Selecting target ");Serial.print(targetId);Serial.print("\n"); }
+  // TODO: SCSI spec call for a 250ms timeout for actual selection, so make this wait up to 250ms.
+  bool ok = poll(STATUS_REG, SR_BSY, SR_BSY);
+  if (!ok) {
+    if (loggingEnabled) { Serial.print("Selection problem?\n"); }
+    return false;
+  }
+  delay(1);
+  //No less than two deskew delays after the initiator detects the BSY signal is true, it shall release the SEL signal
+  //and may change the DATA BUS. -wingel
+  NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_ATN);
+  //Since we followed the SCSI spec, and raised ATN while SEL was true but before BSY was false during selection,
+  //the information transfer phase should be a MESSAGE OUT phase so that we can send the IDENTIFY message.
+  //Wait for start of REQ/ACK handshake
+  ok = poll(STATUS_REG, SR_REQ, SR_REQ);
+  if (!ok) {
+    if (loggingEnabled) { Serial.print("Select: REQ timeout\n"); }
+    NCR5380_write(INITIATOR_COMMAND_REG, 0);
+    return false;
+  }
+  if (loggingEnabled) { Serial.print("Target");Serial.print(targetId);Serial.print("selected. Going into MESSAGE OUT phase.\n"); }
+
   return true;
 }
 
@@ -83,8 +122,16 @@ void NCR5380::begin() {
 }
 
 void NCR5380::test() {
-  bool res = arbitrate();
-  Serial.print("res=");Serial.print(res);Serial.print("\n");
+  bool ok = arbitrate();
+  if (!ok) {
+    Serial.print("arbitrate()=");Serial.print(ok);Serial.print("\n");
+    return;
+  }
+  ok = select(5);
+  if (!ok) {
+    Serial.print("select()=");Serial.print(ok);Serial.print("\n");
+    return;
+  }
 }
 
 

@@ -83,6 +83,7 @@ class NCR5380 {
 	    void write(byte, byte);
 	    byte read(byte);
 	    bool arbitrate();
+	    bool select(int);
 	    bool poll(int, byte, byte);
 	    bool poll2(int, byte, byte, int, byte, byte);
 };
