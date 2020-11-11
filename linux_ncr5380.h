@@ -117,3 +117,10 @@
 
 #define ABORT_TASK_SET      0x06
 #define ABORT               ABORT_TASK_SET
+
+#define IDENTIFY_BASE       0x80
+#define IDENTIFY(can_disconnect, lun)   (IDENTIFY_BASE |\
+         ((can_disconnect) ?  0x40 : 0) |\
+         ((lun) & 0x07))
+
+#define PHASE_SR_TO_TCR(phase) ((phase) >> 2)

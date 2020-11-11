@@ -23,8 +23,8 @@ pinMode(_d6, OUTPUT);pinMode(_d7, OUTPUT);
 #define SET_INITIAL_PIN_VALUES() digitalWrite(_cs_, HIGH);/* Initially disabled */ digitalWrite(_reset_, HIGH);\
 digitalWrite(_dack_, HIGH);digitalWrite(_eop_, HIGH);
 
-#define SET_DATA_DIRECTION(x) pinMode(_d0, x);pinMode(_d1, x);pinMode(_d2, INPUT);pinMode(_d3, INPUT);\
-pinMode(_d4, INPUT);pinMode(_d5, INPUT);pinMode(_d6, INPUT);pinMode(_d7, INPUT);
+#define SET_DATA_DIRECTION(x) pinMode(_d0, x);pinMode(_d1, x);pinMode(_d2, x);pinMode(_d3, x);\
+pinMode(_d4, x);pinMode(_d5, x);pinMode(_d6, x);pinMode(_d7, x);
 
 #define SET_DATA(x) digitalWrite(_d0, x & 0x01);digitalWrite(_d1, (x >> 1) & 0x01);digitalWrite(_d2, (x >> 2) & 0x01);\
 digitalWrite(_d3, (x >> 3) & 0x01);digitalWrite(_d4, (x >> 4) & 0x01);digitalWrite(_d5, (x >> 5) & 0x01);\
@@ -37,12 +37,7 @@ digitalWrite(_d6, (x >> 6) & 0x01);digitalWrite(_d7, (x >> 7) & 0x01);
 #define PULSE_WRITE_PINS() delay(1);SET_WRITE_PINS();delay(1);CLEAR_WRITE_PINS();delay(1);
 #define PULSE_RESET_PIN() digitalWrite(_reset_, LOW); delay(100); digitalWrite(_reset_, HIGH); delay(100);
 
-#define NCR5380_read read
-#define NCR5380_write write
-#define NCR5380_poll_politely poll
-#define NCR5380_poll_politely2 poll2
-
-#define RESET_BUS() write(INITIATOR_COMMAND_REG, ICR_ASSERT_RST);delay(1);write(INITIATOR_COMMAND_REG, 0);
+#define RESET_BUS() NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_RST);delay(1);NCR5380_write(INITIATOR_COMMAND_REG, 0);
 #define CLEAR_INTERRUPT_CONDITIONS() (void)NCR5380_read(RESET_PARITY_INTERRUPT_REG);
 
 #define ID_MASK 1 << scsiId
@@ -80,12 +75,14 @@ class NCR5380 {
 	    int _d7;
 	    bool loggingEnabled = false;
 	    int scsiId = 7;
-	    void write(byte, byte);
-	    byte read(byte);
+	    void NCR5380_write(byte, byte);
+	    byte NCR5380_read(byte);
 	    bool arbitrate();
 	    bool select(int);
-	    bool poll(int, byte, byte);
-	    bool poll2(int, byte, byte, int, byte, byte);
+	    bool NCR5380_poll_politely(int, byte, byte);
+	    bool NCR5380_poll_politely2(int, byte, byte, int, byte, byte);
+	    bool NCR5380_transfer_pio(byte *, int *, byte **);
+	    bool NCR5380_information_transfer();
 };
 
 #endif

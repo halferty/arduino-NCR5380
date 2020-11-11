@@ -14,13 +14,13 @@ void NCR5380::setLoggingEnabled(bool x) { loggingEnabled = x; }
 
 void NCR5380::setScsiId(int x) { scsiId = x; }
 
-void NCR5380::write(byte addr, byte data) {
+void NCR5380::NCR5380_write(byte addr, byte data) {
   SET_ADDR(addr);
   SET_DATA(data);
   PULSE_WRITE_PINS();
 }
 
-byte NCR5380::read(byte addr) {
+byte NCR5380::NCR5380_read(byte addr) {
   SET_ADDR(addr);
   SET_DATA_DIRECTION(INPUT);
   delay(1);
@@ -34,9 +34,9 @@ byte NCR5380::read(byte addr) {
   return res;
 }
 
-bool NCR5380::poll(int reg1, byte bit1, byte val1) { return poll2(reg1, bit1, val1, reg1, bit1, val1); }
+bool NCR5380::NCR5380_poll_politely(int reg1, byte bit1, byte val1) { return NCR5380_poll_politely2(reg1, bit1, val1, reg1, bit1, val1); }
 
-bool NCR5380::poll2(int reg1, byte bit1, byte val1, int reg2, byte bit2, byte val2) {
+bool NCR5380::NCR5380_poll_politely2(int reg1, byte bit1, byte val1, int reg2, byte bit2, byte val2) {
   for (int i = NUM_POLL_ITERATIONS; i > 0; i--) {
     if ((NCR5380_read(reg1) & bit1) == val1) return true;
     if ((NCR5380_read(reg2) & bit2) == val2) return true;
@@ -51,7 +51,7 @@ bool NCR5380::arbitrate() {
   NCR5380_write(OUTPUT_DATA_REG, ID_MASK);
   NCR5380_write(MODE_REG, MR_ARBITRATE);
   // Wait for BUS FREE phase
-  bool ok = poll2(MODE_REG, MR_ARBITRATE, 0, INITIATOR_COMMAND_REG, ICR_ARBITRATION_PROGRESS, ICR_ARBITRATION_PROGRESS);
+  bool ok = NCR5380_poll_politely2(MODE_REG, MR_ARBITRATE, 0, INITIATOR_COMMAND_REG, ICR_ARBITRATION_PROGRESS, ICR_ARBITRATION_PROGRESS);
   if (!ok) {
     if (loggingEnabled) { Serial.print("Arbitration timeout\n"); }
     return false;
@@ -87,7 +87,7 @@ bool NCR5380::select(int targetId) {
   delay(1);
   if (loggingEnabled) { Serial.print("Selecting target ");Serial.print(targetId);Serial.print("\n"); }
   // TODO: SCSI spec call for a 250ms timeout for actual selection, so make this wait up to 250ms.
-  bool ok = poll(STATUS_REG, SR_BSY, SR_BSY);
+  bool ok = NCR5380_poll_politely(STATUS_REG, SR_BSY, SR_BSY);
   if (!ok) {
     if (loggingEnabled) { Serial.print("Selection problem?\n"); }
     return false;
@@ -99,18 +99,29 @@ bool NCR5380::select(int targetId) {
   //Since we followed the SCSI spec, and raised ATN while SEL was true but before BSY was false during selection,
   //the information transfer phase should be a MESSAGE OUT phase so that we can send the IDENTIFY message.
   //Wait for start of REQ/ACK handshake
-  ok = poll(STATUS_REG, SR_REQ, SR_REQ);
+  ok = NCR5380_poll_politely(STATUS_REG, SR_REQ, SR_REQ);
   if (!ok) {
     if (loggingEnabled) { Serial.print("Select: REQ timeout\n"); }
     NCR5380_write(INITIATOR_COMMAND_REG, 0);
     return false;
   }
-  if (loggingEnabled) { Serial.print("Target");Serial.print(targetId);Serial.print("selected. Going into MESSAGE OUT phase.\n"); }
-
+  if (loggingEnabled) { Serial.print("Target ");Serial.print(targetId);Serial.print(" selected. Going into MESSAGE OUT phase.\n"); }
+  byte tmp[3];
+  tmp[0] = IDENTIFY(false, 0);
+  int len = 1;
+  byte phase = PHASE_MSGOUT;
+  byte *msgptr = tmp;
+  NCR5380_transfer_pio(&phase, &len, &msgptr);
+  if (len) {
+    NCR5380_write(INITIATOR_COMMAND_REG, 0);
+    if (loggingEnabled) { Serial.print("IDENTIFY message transfer failed\n"); }
+    return false;
+  }
+  if (loggingEnabled) { Serial.print("Nexus established.\n"); }
   return true;
 }
 
-byte NCR5380::readCurrentScsiDataReg() { return read(CURRENT_SCSI_DATA_REG); }
+byte NCR5380::readCurrentScsiDataReg() { return NCR5380_read(CURRENT_SCSI_DATA_REG); }
 
 //Initializes the device, resets the SCSI bus, etc.
 void NCR5380::begin() {
@@ -121,7 +132,7 @@ void NCR5380::begin() {
     CLEAR_INTERRUPT_CONDITIONS();
 }
 
-void NCR5380::test() {
+void NCR5380::test() {//NCR5380_main
   bool ok = arbitrate();
   if (!ok) {
     Serial.print("arbitrate()=");Serial.print(ok);Serial.print("\n");
@@ -132,97 +143,69 @@ void NCR5380::test() {
     Serial.print("select()=");Serial.print(ok);Serial.print("\n");
     return;
   }
+  ok = NCR5380_information_transfer();
 }
 
+bool NCR5380::NCR5380_transfer_pio(byte *phase, int *count, byte **data) {
+  byte p = *phase, tmp;
+  byte *d = *data;
+  int c = *count;
+  //The NCR5380 chip will only drive the SCSI bus when the phase specified in the appropriate bits of the TARGET COMMAND
+  //REGISTER match the STATUS REGISTER
+  NCR5380_write(TARGET_COMMAND_REG, PHASE_SR_TO_TCR(p));
+  do {// Wait for assertion of REQ, after which the phase bits will be valid
+    if (!NCR5380_poll_politely(STATUS_REG, SR_REQ, SR_REQ)) break;
+    if (loggingEnabled) { Serial.print("REQ asserted\n"); }
+    byte statusRegPhase = NCR5380_read(STATUS_REG) & PHASE_MASK;
+    if (statusRegPhase != p) { //Check for phase mismatch
+      if (loggingEnabled) {
+        Serial.print("phase mismatch found=");
+        Serial.print(statusRegPhase, HEX);
+        Serial.print(" expected=");
+        Serial.print(p, HEX);
+        Serial.print("\n");
+      }
+      break;
+    }
+    //Do actual transfer from SCSI bus to / from memory
+    if (!(p & SR_IO)) { NCR5380_write(OUTPUT_DATA_REG, *d); } else {*d = NCR5380_read(CURRENT_SCSI_DATA_REG); }
+    ++d;
+    //The SCSI standard suggests that in MSGOUT phase, the initiator should drop ATN on the last byte of the message
+    //phase after REQ has been asserted for the handshake but before the initiator raises ACK.
+    if (!(p & SR_IO)) {
+      if (!((p & SR_MSG) && c > 1)) {
+        NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_DATA);
+        NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_DATA | ICR_ASSERT_ACK);
+      } else {
+        NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_DATA | ICR_ASSERT_ATN);
+        NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_DATA | ICR_ASSERT_ATN | ICR_ASSERT_ACK);
+      }
+    } else {
+      NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_ACK);
+    }
+    if (!NCR5380_poll_politely(STATUS_REG, SR_REQ, 0)) break;
+    if (loggingEnabled) { Serial.print("REQ negated, handshake complete\n"); }
+    //We have several special cases to consider during REQ/ACK handshaking :
+    //1.  We were in MSGOUT phase, and we are on the last byte of the message.  ATN must be dropped as ACK is dropped.
+    //2.  We are in a MSGIN phase, and we are on the last byte of the message.  We must exit with ACK asserted, so that
+    //the calling code may raise ATN before dropping ACK to reject the message.
+    //3.  ACK and ATN are clear and the target may proceed as normal.
+    if (!(p == PHASE_MSGIN && c == 1)) {
+      if (p == PHASE_MSGOUT && c > 1) { NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_ATN); }
+      else { NCR5380_write(INITIATOR_COMMAND_REG, 0); }
+    }
+  } while (--c);
+  if (loggingEnabled) { Serial.print("residual ");Serial.print(c);Serial.print("\n"); }
+  *count = c;
+  *data = d;
+  tmp = NCR5380_read(STATUS_REG);
+  //The phase read from the bus is valid if either REQ is (already) asserted or if ACK hasn't been released yet. The
+  //latter applies if we're in MSG IN, DATA IN or STATUS and all bytes have been received.
+  if ((tmp & SR_REQ) || ((tmp & SR_IO) && c == 0)) { *phase = tmp & PHASE_MASK; }
+  else { *phase = PHASE_UNKNOWN; }
+  return (!c || (*phase == p));
+}
 
-// //Essentially resets communication to the ADNS2620 module
-// void ADNS2620::sync()
-// {
-//     digitalWrite(_scl, HIGH);
-//     delay(1);
-// 	digitalWrite(_scl, LOW);
-//     delay(1);
-// 	digitalWrite(_scl, HIGH);
-//     delay(100);
-// }
+bool NCR5380::NCR5380_information_transfer() {
 
-// //Reads a register from the ADNS2620 sensor. Returns the result to the calling function.
-// //Example: value = mouse.read(CONFIGURATION_REG);
-// char ADNS2620::read(char address)
-// {
-//     char value=0;
-// 	pinMode(_sda, OUTPUT); //Make sure the SDIO pin is set as an output.
-//     digitalWrite(_scl, HIGH); //Make sure the clock is high.
-//     address &= 0x7F;    //Make sure the highest bit of the address byte is '0' to indicate a read.
- 
-//     //Send the Address to the ADNS2620
-//     for(int address_bit=7; address_bit >=0; address_bit--){
-//         digitalWrite(_scl, LOW);  //Lower the clock
-//         pinMode(_sda, OUTPUT); //Make sure the SDIO pin is set as an output.
-        
-//         //If the current bit is a 1, set the SDIO pin. If not, clear the SDIO pin
-//         if(address & (1<<address_bit)){
-//             digitalWrite(_sda, HIGH);
-//         }
-//         else{
-//             digitalWrite(_sda, LOW);
-//         }
-//         delayMicroseconds(10);
-//         digitalWrite(_scl, HIGH);
-//         delayMicroseconds(10);
-//     }
-    
-//     delayMicroseconds(120);   //Allow extra time for ADNS2620 to transition the SDIO pin (per datasheet)
-//     //Make SDIO an input on the microcontroller
-//     pinMode(_sda, INPUT);	//Make sure the SDIO pin is set as an input.
-// 	digitalWrite(_sda, HIGH); //Enable the internal pull-up
-        
-//     //Send the Value byte to the ADNS2620
-//     for(int value_bit=7; value_bit >= 0; value_bit--){
-//         digitalWrite(_scl, LOW);  //Lower the clock
-//         delayMicroseconds(10); //Allow the ADNS2620 to configure the SDIO pin
-//         digitalWrite(_scl, HIGH);  //Raise the clock
-//         delayMicroseconds(10);
-//         //If the SDIO pin is high, set the current bit in the 'value' variable. If low, leave the value bit default (0).    
-// 		//if((ADNS_PIN & (1<<ADNS_sda)) == (1<<ADNS_sda))value|=(1<<value_bit);
-// 		if(digitalRead(_sda))value |= (1<<value_bit);
-
-//     }
-    
-//     return value;
-// }	
-
-// //Writes a value to a register on the ADNS2620.
-// //Example: mouse.write(CONFIGURATION_REG, 0x01);
-// void ADNS2620::write(char address, char value)
-// {
-// 	pinMode(_sda, OUTPUT);	//Make sure the SDIO pin is set as an output.
-//     digitalWrite(_scl, HIGH);          //Make sure the clock is high.
-//     address |= 0x80;    //Make sure the highest bit of the address byte is '1' to indicate a write.
-
-//     //Send the Address to the ADNS2620
-//     for(int address_bit=7; address_bit >=0; address_bit--){
-//         digitalWrite(_scl, LOW); //Lower the clock
-        
-//         delayMicroseconds(10); //Give a small delay (only needed for the first iteration to ensure that the ADNS2620 relinquishes
-//                     //control of SDIO if we are performing this write after a 'read' command.
-        
-//         //If the current bit is a 1, set the SDIO pin. If not, clear the SDIO pin
-//         if(address & (1<<address_bit))digitalWrite(_sda, HIGH);
-//         else digitalWrite(_sda, LOW);
-//         delayMicroseconds(10);
-//         digitalWrite(_scl, HIGH);
-//         delayMicroseconds(10);
-//     }
-    
-//     //Send the Value byte to the ADNS2620
-//     for(int value_bit=7; value_bit >= 0; value_bit--){
-//         digitalWrite(_scl, LOW);  //Lower the clock
-//         //If the current bit is a 1, set the SDIO pin. If not, clear the SDIO pin
-//         if(value & (1<<value_bit))digitalWrite(_sda, HIGH);
-//         else digitalWrite(_sda, LOW);
-//         delayMicroseconds(10);
-//         digitalWrite(_scl, HIGH);
-//         delayMicroseconds(10);
-//     }
-// }
+}
