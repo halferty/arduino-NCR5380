@@ -1,4 +1,7 @@
-// Portions of this file copied from Linux source, copyright Linus Torvalds and many others
+//Arduino NCR5380 Library
+//Copyright 2020 Edward Halferty
+// Portions of this file copied from Linux source, copyright various people such as:
+// Linus Torvalds, Drew Eckhardt, Ray Van Tassle, Ingmar Baumgart, Ronald van Cuijlenborg, Alan Cox, and others.
 
 //The contents of the OUTPUT DATA register are asserted on the bus when either arbitration is occurring or the
 //phase-indicating signals (IO, CD, MSG) in the TARGET COMMAND register and the ASSERT DATA bit in the
@@ -110,10 +113,51 @@
 #define FLAG_LATE_DMA_SETUP   32  /* Setup NCR before DMA H/W */
 #define FLAG_TOSHIBA_DELAY    128 /* Allow for borken CD-ROMs */
 
+/*
+ *  MESSAGE CODES
+ */
+
+#define COMMAND_COMPLETE    0x00
+#define EXTENDED_MESSAGE    0x01
+#define     EXTENDED_MODIFY_DATA_POINTER    0x00
+#define     EXTENDED_SDTR                   0x01
+#define     EXTENDED_EXTENDED_IDENTIFY      0x02    /* SCSI-I only */
+#define     EXTENDED_WDTR                   0x03
+#define     EXTENDED_PPR                    0x04
+#define     EXTENDED_MODIFY_BIDI_DATA_PTR   0x05
+#define SAVE_POINTERS       0x02
+#define RESTORE_POINTERS    0x03
+#define DISCONNECT          0x04
+#define INITIATOR_ERROR     0x05
+#define ABORT_TASK_SET      0x06
+#define MESSAGE_REJECT      0x07
+#define NOP                 0x08
+#define MSG_PARITY_ERROR    0x09
+#define LINKED_CMD_COMPLETE 0x0a
+#define LINKED_FLG_CMD_COMPLETE 0x0b
+#define TARGET_RESET        0x0c
+#define ABORT_TASK          0x0d
+#define CLEAR_TASK_SET      0x0e
+#define INITIATE_RECOVERY   0x0f            /* SCSI-II only */
+#define RELEASE_RECOVERY    0x10            /* SCSI-II only */
+#define CLEAR_ACA           0x16
+#define LOGICAL_UNIT_RESET  0x17
+#define SIMPLE_QUEUE_TAG    0x20
+#define HEAD_OF_QUEUE_TAG   0x21
+#define ORDERED_QUEUE_TAG   0x22
+#define IGNORE_WIDE_RESIDUE 0x23
+#define ACA                 0x24
+#define QAS_REQUEST         0x55
+
+
+
+// Stuff from around the Linux codebase
+
 #define  ENXIO    6  /* No such device or address */
 #define ETIMEDOUT 145
 #define NUM_POLL_LOOPS 1000
 #define HZ 1024
+#define NCR5380_PIO_CHUNK_SIZE		256
 
 #define ABORT_TASK_SET      0x06
 #define ABORT               ABORT_TASK_SET

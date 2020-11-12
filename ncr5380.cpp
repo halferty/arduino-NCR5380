@@ -1,7 +1,7 @@
-/* Arduino NCR5380 Library
- * Copyright 2020 Edward Halferty
- * Portions of this file copied from Linux source, copyright Linus Torvalds and many others
-*/
+//Arduino NCR5380 Library
+//Copyright 2020 Edward Halferty
+// Portions of this file copied from Linux source, copyright various people such as:
+// Linus Torvalds, Drew Eckhardt, Ray Van Tassle, Ingmar Baumgart, Ronald van Cuijlenborg, Alan Cox, and others.
 
 #include "ncr5380.h"
 
@@ -143,7 +143,21 @@ void NCR5380::test() {//NCR5380_main
     Serial.print("select()=");Serial.print(ok);Serial.print("\n");
     return;
   }
-  ok = NCR5380_information_transfer();
+  byte mm[8];
+  mm[0] = 0x12;  // 0x12 = INQUIRY command
+  mm[1] = 0;
+  mm[2] = 0;
+  mm[3] = 0;
+  mm[4] = 0xff;
+  mm[5] = 0;
+  byte *b = mm;
+  // ok = NCR5380_information_transfer(5, 0, &b);
+  ok = NCR5380_command(b, 6);
+  if (!ok) {
+    // Serial.print("NCR5380_information_transfer()=");Serial.print(ok);Serial.print("\n");
+    Serial.print("NCR5380_information_transfer()=");Serial.print(ok);Serial.print("\n");
+    return;
+  }
 }
 
 bool NCR5380::NCR5380_transfer_pio(byte *phase, int *count, byte **data) {
@@ -206,6 +220,7 @@ bool NCR5380::NCR5380_transfer_pio(byte *phase, int *count, byte **data) {
   return (!c || (*phase == p));
 }
 
-bool NCR5380::NCR5380_information_transfer() {
-
+bool NCR5380::NCR5380_command(byte *buf, int count) {
+  byte phase = NCR5380_read(STATUS_REG) & PHASE_MASK;
+  NCR5380_transfer_pio(&phase, &count, &buf);
 }

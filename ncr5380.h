@@ -1,6 +1,7 @@
-/* Arduino NCR5380 Library
- * Copyright 2020 Edward Halferty
-*/
+//Arduino NCR5380 Library
+//Copyright 2020 Edward Halferty
+// Portions of this file copied from Linux source, copyright various people such as:
+// Linus Torvalds, Drew Eckhardt, Ray Van Tassle, Ingmar Baumgart, Ronald van Cuijlenborg, Alan Cox, and others.
 
 #ifndef ncr5380_h
 #define ncr5380_h
@@ -82,7 +83,7 @@ class NCR5380 {
 	    bool NCR5380_poll_politely(int, byte, byte);
 	    bool NCR5380_poll_politely2(int, byte, byte, int, byte, byte);
 	    bool NCR5380_transfer_pio(byte *, int *, byte **);
-	    bool NCR5380_information_transfer();
+	    bool NCR5380_command(byte *, int);
 };
 
 #endif

@@ -1,0 +1,581 @@
+#if 0
+static void NCR5380_information_transfer(struct Scsi_Host *instance) __releases(&hostdata->lock) __acquires(&hostdata->lock) {
+  struct NCR5380_hostdata *hostdata = shost_priv(instance);
+  unsigned char msgout = NOP;
+  int sink = 0;
+  int len;
+  int transfersize;
+  unsigned char *data;
+  unsigned char phase, tmp, extended_msg[10], old_phase = 0xff;
+  struct scsi_cmnd *cmd;
+  while ((cmd = hostdata->connected)) {
+    struct NCR5380_cmd *ncmd = scsi_cmd_priv(cmd);
+    tmp = NCR5380_read(STATUS_REG);
+    if (tmp & SR_REQ) { //We only have a valid SCSI phase when REQ is asserted
+      phase = (tmp & PHASE_MASK);
+      if (phase != old_phase) {
+        old_phase = phase;
+        NCR5380_dprint_phase(NDEBUG_INFORMATION, instance);
+      }
+      if (sink && (phase != PHASE_MSGOUT)) {
+        NCR5380_write(TARGET_COMMAND_REG, PHASE_SR_TO_TCR(tmp));
+        NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE | ICR_ASSERT_ATN | ICR_ASSERT_ACK);
+        while (NCR5380_read(STATUS_REG) & SR_REQ) {}
+        NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE | ICR_ASSERT_ATN);
+        sink = 0;
+        continue;
+      }
+      switch (phase) {
+      case PHASE_DATAOUT:
+      case PHASE_DATAIN:
+        //If there is no room left in the current buffer in the scatter-gather list, move onto the next one.
+        advance_sg_buffer(cmd);
+        dsprintk(NDEBUG_INFORMATION, instance, "this residual %d, sg ents %d\n", cmd->SCp.this_residual, sg_nents(cmd->SCp.buffer));
+        //The preferred transfer method is going to be PSEUDO-DMA for systems that are strictly PIO, since we can let
+        //the hardware do the handshaking. For this to work, we need to know the transfersize ahead of time, since the
+        //pseudo-DMA code will sit in an unconditional loop.
+        transfersize = 0;
+        if (!cmd->device->borken)
+          transfersize = NCR5380_dma_xfer_len(hostdata, cmd);
+        if (transfersize > 0) {
+          len = transfersize;
+          if (NCR5380_transfer_dma(instance, &phase, &len, (unsigned char **)&cmd->SCp.ptr)) {
+            //If the watchdog timer fires, all future accesses to this device will use the polled-IO.
+            scmd_printk(KERN_INFO, cmd, "switching to slow handshake\n");
+            cmd->device->borken = 1;
+            do_reset(instance);
+            bus_reset_cleanup(instance);
+          }
+        } else {
+          //Transfer a small chunk so that the irq mode lock is not held too long.
+          transfersize = min(cmd->SCp.this_residual, NCR5380_PIO_CHUNK_SIZE);
+          len = transfersize;
+          NCR5380_transfer_pio(instance, &phase, &len, (unsigned char **)&cmd->SCp.ptr);
+          cmd->SCp.this_residual -= transfersize - len;
+        }
+        return;
+      case PHASE_MSGIN:
+        len = 1;
+        data = &tmp;
+        NCR5380_transfer_pio(instance, &phase, &len, &data);
+        cmd->SCp.Message = tmp;
+        switch (tmp) {
+        case ABORT:
+        case COMMAND_COMPLETE:
+          sink = 1; //Accept message by clearing ACK
+          NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE);
+          dsprintk(NDEBUG_QUEUES, instance, "COMMAND COMPLETE %p target %d lun %llu\n", cmd, scmd_id(cmd), cmd->device->lun);
+          hostdata->connected = NULL;
+          hostdata->busy[scmd_id(cmd)] &= ~(1 << cmd->device->lun);
+          cmd->result &= ~0xffff;
+          cmd->result |= cmd->SCp.Status;
+          cmd->result |= cmd->SCp.Message << 8;
+          set_resid_from_SCp(cmd);
+          if (cmd->cmnd[0] == REQUEST_SENSE) complete_cmd(instance, cmd);
+          else {
+            if (cmd->SCp.Status == SAM_STAT_CHECK_CONDITION || cmd->SCp.Status == SAM_STAT_COMMAND_TERMINATED) {
+              dsprintk(NDEBUG_QUEUES, instance, "autosense: adding cmd %p to tail of autosense queue\n", cmd);
+              list_add_tail(&ncmd->list, &hostdata->autosense);
+            } else
+              complete_cmd(instance, cmd);
+          }
+          //Restore phase bits to 0 so an interrupted selection, arbitration can resume.
+          NCR5380_write(TARGET_COMMAND_REG, 0);
+          maybe_release_dma_irq(instance);
+          return;
+        case MESSAGE_REJECT:
+          NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE); //Accept message by clearing ACK
+          switch (hostdata->last_message) {
+          case HEAD_OF_QUEUE_TAG:
+          case ORDERED_QUEUE_TAG:
+          case SIMPLE_QUEUE_TAG:
+            cmd->device->simple_tags = 0;
+            hostdata->busy[cmd->device->id] |= (1 << (cmd->device->lun & 0xFF));
+            break;
+          default:
+            break;
+          }
+          break;
+        case DISCONNECT:
+          NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE); //Accept message by clearing ACK
+          hostdata->connected = NULL;
+          list_add(&ncmd->list, &hostdata->disconnected);
+          dsprintk(NDEBUG_INFORMATION | NDEBUG_QUEUES, instance, "connected command %p for target %d lun %llu moved to disconnected queue\n", cmd, scmd_id(cmd), cmd->device->lun);
+          //Restore phase bits to 0 so an interrupted selection, arbitration can resume.
+          NCR5380_write(TARGET_COMMAND_REG, 0);
+          return;
+          //The SCSI data pointer is *IMPLICITLY* saved on a disconnect operation, in violation of the SCSI spec so we
+          //can safely ignore SAVE/RESTORE pointers calls. Unfortunately, some disks violate the SCSI spec and don't
+          //issue the required SAVE_POINTERS message before disconnecting, and we have to break spec to remain compatible.
+        case SAVE_POINTERS:
+        case RESTORE_POINTERS:
+          NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE); //Accept message by clearing ACK
+          break;
+        case EXTENDED_MESSAGE:
+          //Start the message buffer with the EXTENDED_MESSAGE byte, since spi_print_msg() wants the whole thing.
+          extended_msg[0] = EXTENDED_MESSAGE;
+          NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE); //Accept first byte by clearing ACK
+          spin_unlock_irq(&hostdata->lock);
+          dsprintk(NDEBUG_EXTENDED, instance, "receiving extended message\n");
+          len = 2;
+          data = extended_msg + 1;
+          phase = PHASE_MSGIN;
+          NCR5380_transfer_pio(instance, &phase, &len, &data);
+          dsprintk(NDEBUG_EXTENDED, instance, "length %d, code 0x%02x\n", (int)extended_msg[1], (int)extended_msg[2]);
+          if (!len && extended_msg[1] > 0 &&  extended_msg[1] <= sizeof(extended_msg) - 2) {
+            NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE); //Accept third byte by clearing ACK
+            len = extended_msg[1] - 1;
+            data = extended_msg + 3;
+            phase = PHASE_MSGIN;
+            NCR5380_transfer_pio(instance, &phase, &len, &data);
+            dsprintk(NDEBUG_EXTENDED, instance, "message received, residual %d\n", len);
+            switch (extended_msg[2]) {
+            case EXTENDED_SDTR:
+            case EXTENDED_WDTR:
+              tmp = 0;
+            }
+          } else if (len) {
+            shost_printk(KERN_ERR, instance, "error receiving extended message\n");
+            tmp = 0;
+          } else {
+            shost_printk(KERN_NOTICE, instance, "extended message code %02x length %d is too long\n", extended_msg[2], extended_msg[1]);
+            tmp = 0;
+          }
+          spin_lock_irq(&hostdata->lock);
+          if (!hostdata->connected) return;
+          fallthrough; //Reject messag
+        default:
+          //If we get something weird that we aren't expecting, log it.
+          if (tmp == EXTENDED_MESSAGE)
+            { scmd_printk(KERN_INFO, cmd, "rejecting unknown extended message code %02x, length %d\n", extended_msg[2], extended_msg[1]); }
+          else if (tmp) { scmd_printk(KERN_INFO, cmd, "rejecting unknown message code %02x\n", tmp); }
+          msgout = MESSAGE_REJECT;
+          NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE | ICR_ASSERT_ATN);
+          break;
+        } /* switch (tmp) */
+        break;
+      case PHASE_MSGOUT:
+        len = 1;
+        data = &msgout;
+        hostdata->last_message = msgout;
+        NCR5380_transfer_pio(instance, &phase, &len, &data);
+        if (msgout == ABORT) {
+          hostdata->connected = NULL;
+          hostdata->busy[scmd_id(cmd)] &= ~(1 << cmd->device->lun);
+          cmd->result = DID_ERROR << 16;
+          complete_cmd(instance, cmd);
+          maybe_release_dma_irq(instance);
+          return;
+        }
+        msgout = NOP;
+        break;
+      case PHASE_CMDOUT:
+        len = cmd->cmd_len;
+        data = cmd->cmnd;
+        //XXX for performance reasons, on machines with a PSEUDO-DMA architecture we should probably use the dma transfer function.
+        NCR5380_transfer_pio(instance, &phase, &len, &data);
+        break;
+      case PHASE_STATIN:
+        len = 1;
+        data = &tmp;
+        NCR5380_transfer_pio(instance, &phase, &len, &data);
+        cmd->SCp.Status = tmp;
+        break;
+      default:
+        shost_printk(KERN_ERR, instance, "unknown phase\n");
+        NCR5380_dprint(NDEBUG_ANY, instance);
+      } /* switch(phase) */
+    } else {
+      spin_unlock_irq(&hostdata->lock);
+      NCR5380_poll_politely(hostdata, STATUS_REG, SR_REQ, SR_REQ, HZ);
+      spin_lock_irq(&hostdata->lock);
+    }
+  }
+}
+#endif
+
+
+
+// static int NCR5380_transfer_pio(struct Scsi_Host *instance, unsigned char *phase, int *count, unsigned char **data) {
+//   struct NCR5380_hostdata *hostdata = shost_priv(instance);
+//   unsigned char p = *phase, tmp;
+//   int c = *count;
+//   unsigned char *d = *data;
+//   NCR5380_write(TARGET_COMMAND_REG, PHASE_SR_TO_TCR(p));
+//   do {// Wait for assertion of REQ, after which the phase bits will be valid
+//     if (NCR5380_poll_politely(hostdata, STATUS_REG, SR_REQ, SR_REQ, HZ) < 0) break;
+//     dsprintk(NDEBUG_HANDSHAKE, instance, "REQ asserted\n");
+//     if ((NCR5380_read(STATUS_REG) & PHASE_MASK) != p) { //Check for phase mismatch
+//       dsprintk(NDEBUG_PIO, instance, "phase mismatch\n");
+//       NCR5380_dprint_phase(NDEBUG_PIO, instance);
+//       break;
+//     }
+//     //Do actual transfer from SCSI bus to / from memory
+//     if (!(p & SR_IO)) { NCR5380_write(OUTPUT_DATA_REG, *d); } else {*d = NCR5380_read(CURRENT_SCSI_DATA_REG); }
+//     ++d;
+//     //The SCSI standard suggests that in MSGOUT phase, the initiator should drop ATN on the last byte of the message
+//     //phase after REQ has been asserted for the handshake but before the initiator raises ACK.
+//     if (!(p & SR_IO)) {
+//       if (!((p & SR_MSG) && c > 1)) {
+//         NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE | ICR_ASSERT_DATA);
+//         NCR5380_dprint(NDEBUG_PIO, instance);
+//         NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE | ICR_ASSERT_DATA | ICR_ASSERT_ACK);
+//       } else {
+//         NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE | ICR_ASSERT_DATA | ICR_ASSERT_ATN);
+//         NCR5380_dprint(NDEBUG_PIO, instance);
+//         NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE | ICR_ASSERT_DATA | ICR_ASSERT_ATN | ICR_ASSERT_ACK);
+//       }
+//     } else {
+//       NCR5380_dprint(NDEBUG_PIO, instance);
+//       NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE | ICR_ASSERT_ACK);
+//     }
+//     if (NCR5380_poll_politely(hostdata, STATUS_REG, SR_REQ, 0, 5 * HZ) < 0) break;
+//     dsprintk(NDEBUG_HANDSHAKE, instance, "REQ negated, handshake complete\n");
+//     //We have several special cases to consider during REQ/ACK handshaking :
+//     //1.  We were in MSGOUT phase, and we are on the last byte of the message.  ATN must be dropped as ACK is dropped.
+//     //2.  We are in a MSGIN phase, and we are on the last byte of the message.  We must exit with ACK asserted, so that
+//     //the calling code may raise ATN before dropping ACK to reject the message.
+//     //3.  ACK and ATN are clear and the target may proceed as normal.
+//     if (!(p == PHASE_MSGIN && c == 1)) {
+//       if (p == PHASE_MSGOUT && c > 1) { NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE | ICR_ASSERT_ATN); }
+//       else { NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE); }
+//     }
+//   } while (--c);
+//   dsprintk(NDEBUG_PIO, instance, "residual %d\n", c);
+//   *count = c;
+//   *data = d;
+//   tmp = NCR5380_read(STATUS_REG);
+//   //The phase read from the bus is valid if either REQ is (already) asserted or if ACK hasn't been released yet. The
+//   //latter applies if we're in MSG IN, DATA IN or STATUS and all bytes have been received.
+//   if ((tmp & SR_REQ) || ((tmp & SR_IO) && c == 0)) { *phase = tmp & PHASE_MASK; }
+//   else { *phase = PHASE_UNKNOWN; }
+//   if (!c || (*phase == p)) { return 0; } else { return -1; }
+// }
+
+
+
+
+
+
+
+// {
+//   dsprintk(NDEBUG_SELECTION, instance, "target %d selected, going into MESSAGE OUT phase.\n",
+//            scmd_id(cmd));
+//   tmp[0] = IDENTIFY(can_disconnect, cmd->device->lun);
+
+//   len = 1;
+//   data = tmp;
+//   phase = PHASE_MSGOUT;
+//   NCR5380_transfer_pio(instance, &phase, &len, &data);
+//   if (len) {
+//     NCR5380_write(INITIATOR_COMMAND_REG, ICR_BASE);
+//     cmd->result = DID_ERROR << 16;
+//     complete_cmd(instance, cmd);
+//     dsprintk(NDEBUG_SELECTION, instance, "IDENTIFY message transfer failed\n");
+//     ret = false;
+//     goto out;
+//   }
+
+//   dsprintk(NDEBUG_SELECTION, instance, "nexus established.\n");
+
+//   hostdata->connected = cmd;
+//   hostdata->busy[cmd->device->id] |= 1 << cmd->device->lun;
+
+// #ifdef SUN3_SCSI_VME
+//   dregs->csr |= CSR_INTR;
+// #endif
+
+//   initialize_SCp(cmd);
+
+//   ret = false;
+
+// out:
+//   if (!hostdata->selecting)
+//     return false;
+//   hostdata->selecting = NULL;
+//   return ret;
+
+// }
+// //Essentially resets communication to the ADNS2620 module
+// void ADNS2620::sync()
+// {
+//     digitalWrite(_scl, HIGH);
+//     delay(1);
+//  digitalWrite(_scl, LOW);
+//     delay(1);
+//  digitalWrite(_scl, HIGH);
+//     delay(100);
+// }
+
+// //Reads a register from the ADNS2620 sensor. Returns the result to the calling function.
+// //Example: value = mouse.read(CONFIGURATION_REG);
+// char ADNS2620::read(char address)
+// {
+//     char value=0;
+//  pinMode(_sda, OUTPUT); //Make sure the SDIO pin is set as an output.
+//     digitalWrite(_scl, HIGH); //Make sure the clock is high.
+//     address &= 0x7F;    //Make sure the highest bit of the address byte is '0' to indicate a read.
+ 
+//     //Send the Address to the ADNS2620
+//     for(int address_bit=7; address_bit >=0; address_bit--){
+//         digitalWrite(_scl, LOW);  //Lower the clock
+//         pinMode(_sda, OUTPUT); //Make sure the SDIO pin is set as an output.
+        
+//         //If the current bit is a 1, set the SDIO pin. If not, clear the SDIO pin
+//         if(address & (1<<address_bit)){
+//             digitalWrite(_sda, HIGH);
+//         }
+//         else{
+//             digitalWrite(_sda, LOW);
+//         }
+//         delayMicroseconds(10);
+//         digitalWrite(_scl, HIGH);
+//         delayMicroseconds(10);
+//     }
+    
+//     delayMicroseconds(120);   //Allow extra time for ADNS2620 to transition the SDIO pin (per datasheet)
+//     //Make SDIO an input on the microcontroller
+//     pinMode(_sda, INPUT);  //Make sure the SDIO pin is set as an input.
+//  digitalWrite(_sda, HIGH); //Enable the internal pull-up
+        
+//     //Send the Value byte to the ADNS2620
+//     for(int value_bit=7; value_bit >= 0; value_bit--){
+//         digitalWrite(_scl, LOW);  //Lower the clock
+//         delayMicroseconds(10); //Allow the ADNS2620 to configure the SDIO pin
+//         digitalWrite(_scl, HIGH);  //Raise the clock
+//         delayMicroseconds(10);
+//         //If the SDIO pin is high, set the current bit in the 'value' variable. If low, leave the value bit default (0).    
+//    //if((ADNS_PIN & (1<<ADNS_sda)) == (1<<ADNS_sda))value|=(1<<value_bit);
+//    if(digitalRead(_sda))value |= (1<<value_bit);
+
+//     }
+    
+//     return value;
+// }  
+
+// //Writes a value to a register on the ADNS2620.
+// //Example: mouse.write(CONFIGURATION_REG, 0x01);
+// void ADNS2620::write(char address, char value)
+// {
+//  pinMode(_sda, OUTPUT);  //Make sure the SDIO pin is set as an output.
+//     digitalWrite(_scl, HIGH);          //Make sure the clock is high.
+//     address |= 0x80;    //Make sure the highest bit of the address byte is '1' to indicate a write.
+
+//     //Send the Address to the ADNS2620
+//     for(int address_bit=7; address_bit >=0; address_bit--){
+//         digitalWrite(_scl, LOW); //Lower the clock
+        
+//         delayMicroseconds(10); //Give a small delay (only needed for the first iteration to ensure that the ADNS2620 relinquishes
+//                     //control of SDIO if we are performing this write after a 'read' command.
+        
+//         //If the current bit is a 1, set the SDIO pin. If not, clear the SDIO pin
+//         if(address & (1<<address_bit))digitalWrite(_sda, HIGH);
+//         else digitalWrite(_sda, LOW);
+//         delayMicroseconds(10);
+//         digitalWrite(_scl, HIGH);
+//         delayMicroseconds(10);
+//     }
+    
+//     //Send the Value byte to the ADNS2620
+//     for(int value_bit=7; value_bit >= 0; value_bit--){
+//         digitalWrite(_scl, LOW);  //Lower the clock
+//         //If the current bit is a 1, set the SDIO pin. If not, clear the SDIO pin
+//         if(value & (1<<value_bit))digitalWrite(_sda, HIGH);
+//         else digitalWrite(_sda, LOW);
+//         delayMicroseconds(10);
+//         digitalWrite(_scl, HIGH);
+//         delayMicroseconds(10);
+//     }
+// }
+
+bool NCR5380::NCR5380_information_transfer(int targetId, int lun, byte **fullData) {
+  byte msgout = NOP;
+  int sink = 0;
+  int len;
+  int transfersize;
+  byte *data;
+  byte phase, tmp, message, extended_msg[10], old_phase = 0xff;
+  int this_residual = NCR5380_PIO_CHUNK_SIZE;
+  while (1) {
+    tmp = NCR5380_read(STATUS_REG);
+    if (tmp & SR_REQ) { //We only have a valid SCSI phase when REQ is asserted
+      phase = (tmp & PHASE_MASK);
+      if (phase != old_phase) {
+        old_phase = phase;
+      }
+      if (sink && (phase != PHASE_MSGOUT)) {
+        NCR5380_write(TARGET_COMMAND_REG, PHASE_SR_TO_TCR(tmp));
+        NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_ATN | ICR_ASSERT_ACK);
+        while (NCR5380_read(STATUS_REG) & SR_REQ) {}
+        NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_ATN);
+        sink = 0;
+        continue;
+      }
+      switch (phase) {
+      case PHASE_DATAOUT:
+      case PHASE_DATAIN:
+        //If there is no room left in the current buffer in the scatter-gather list, move onto the next one.
+        //advance_sg_buffer(cmd);
+        //dsprintk(NDEBUG_INFORMATION, instance, "this residual %d, sg ents %d\n", cmd->SCp.this_residual, sg_nents(cmd->SCp.buffer));
+        //The preferred transfer method is going to be PSEUDO-DMA for systems that are strictly PIO, since we can let
+        //the hardware do the handshaking. For this to work, we need to know the transfersize ahead of time, since the
+        //pseudo-DMA code will sit in an unconditional loop.
+        //Transfer a small chunk so that the irq mode lock is not held too long.
+        transfersize = min(this_residual, NCR5380_PIO_CHUNK_SIZE);
+        len = transfersize;
+        NCR5380_transfer_pio(&phase, &len, fullData);
+        this_residual -= transfersize - len;
+        return;
+      case PHASE_MSGIN:
+        len = 1;
+        data = &tmp;
+        NCR5380_transfer_pio(&phase, &len, &data);
+        message = tmp;
+        switch (tmp) {
+        case ABORT:
+        case COMMAND_COMPLETE:
+          sink = 1; //Accept message by clearing ACK
+          NCR5380_write(INITIATOR_COMMAND_REG, 0);
+          if (loggingEnabled) {
+            Serial.print("COMMAND COMPLETE");
+            Serial.print("\n");
+          }
+          // hostdata->connected = NULL;
+          // hostdata->busy[scmd_id(cmd)] &= ~(1 << cmd->device->lun);
+          // cmd->result &= ~0xffff;
+          // cmd->result |= cmd->SCp.Status;
+          // cmd->result |= cmd->SCp.Message << 8;
+          // set_resid_from_SCp(cmd);
+          // if (cmd->cmnd[0] == REQUEST_SENSE) complete_cmd(instance, cmd);
+          // else {
+          //   if (cmd->SCp.Status == SAM_STAT_CHECK_CONDITION || cmd->SCp.Status == SAM_STAT_COMMAND_TERMINATED) {
+          //     dsprintk(NDEBUG_QUEUES, instance, "autosense: adding cmd %p to tail of autosense queue\n", cmd);
+          //     list_add_tail(&ncmd->list, &hostdata->autosense);
+          //   } else
+          //     complete_cmd(instance, cmd);
+          // }
+          //Restore phase bits to 0 so an interrupted selection, arbitration can resume.
+          NCR5380_write(TARGET_COMMAND_REG, 0);
+          //maybe_release_dma_irq(instance);
+          return;
+
+
+
+
+
+
+
+        case MESSAGE_REJECT:
+          NCR5380_write(INITIATOR_COMMAND_REG, 0); //Accept message by clearing ACK
+          // switch (hostdata->last_message) {
+          // case HEAD_OF_QUEUE_TAG:
+          // case ORDERED_QUEUE_TAG:
+          // case SIMPLE_QUEUE_TAG:
+          //   cmd->device->simple_tags = 0;
+          //   hostdata->busy[cmd->device->id] |= (1 << (cmd->device->lun & 0xFF));
+          //   break;
+          // default:
+          //   break;
+          // }
+          break;
+        case DISCONNECT:
+          NCR5380_write(INITIATOR_COMMAND_REG, 0); //Accept message by clearing ACK
+          //hostdata->connected = NULL;
+          //list_add(&ncmd->list, &hostdata->disconnected);
+          //dsprintk(NDEBUG_INFORMATION | NDEBUG_QUEUES, instance, "connected command %p for target %d lun %llu moved to disconnected queue\n", cmd, scmd_id(cmd), cmd->device->lun);
+          //Restore phase bits to 0 so an interrupted selection, arbitration can resume.
+          NCR5380_write(TARGET_COMMAND_REG, 0);
+          return;
+          //The SCSI data pointer is *IMPLICITLY* saved on a disconnect operation, in violation of the SCSI spec so we
+          //can safely ignore SAVE/RESTORE pointers calls. Unfortunately, some disks violate the SCSI spec and don't
+          //issue the required SAVE_POINTERS message before disconnecting, and we have to break spec to remain compatible.
+        case SAVE_POINTERS:
+        case RESTORE_POINTERS:
+          NCR5380_write(INITIATOR_COMMAND_REG, 0); //Accept message by clearing ACK
+          break;
+        case EXTENDED_MESSAGE:
+          //Start the message buffer with the EXTENDED_MESSAGE byte, since spi_print_msg() wants the whole thing.
+          extended_msg[0] = EXTENDED_MESSAGE;
+          NCR5380_write(INITIATOR_COMMAND_REG, 0); //Accept first byte by clearing ACK
+          //spin_unlock_irq(&hostdata->lock);
+          if (loggingEnabled) { Serial.print("receiving extended message\n"); }
+          len = 2;
+          data = extended_msg + 1;
+          phase = PHASE_MSGIN;
+          NCR5380_transfer_pio(&phase, &len, &data);
+          //dsprintk(NDEBUG_EXTENDED, instance, "length %d, code 0x%02x\n", (int)extended_msg[1], (int)extended_msg[2]);
+          if (!len && extended_msg[1] > 0 &&  extended_msg[1] <= sizeof(extended_msg) - 2) {
+            NCR5380_write(INITIATOR_COMMAND_REG, 0); //Accept third byte by clearing ACK
+            len = extended_msg[1] - 1;
+            data = extended_msg + 3;
+            phase = PHASE_MSGIN;
+            NCR5380_transfer_pio(&phase, &len, &data);
+            //dsprintk(NDEBUG_EXTENDED, instance, "message received, residual %d\n", len);
+            switch (extended_msg[2]) {
+            case EXTENDED_SDTR:
+            case EXTENDED_WDTR:
+              tmp = 0;
+            }
+          } else if (len) {
+            //shost_printk(KERN_ERR, instance, "error receiving extended message\n");
+            tmp = 0;
+          } else {
+            //shost_printk(KERN_NOTICE, instance, "extended message code %02x length %d is too long\n", extended_msg[2], extended_msg[1]);
+            tmp = 0;
+          }
+          //spin_lock_irq(&hostdata->lock);
+          //if (!hostdata->connected) return;
+          //fallthrough; //Reject message
+        default:
+          //If we get something weird that we aren't expecting, log it.
+          if (tmp == EXTENDED_MESSAGE) { if (loggingEnabled) {
+            Serial.print("rejecting unknown extended message code ");Serial.print(extended_msg[2], HEX);
+            Serial.print(" length ");Serial.print(extended_msg[1], HEX);
+            Serial.print("\n");
+          }}
+          else if (tmp) { if (loggingEnabled) {
+            Serial.print("rejecting unknown extended message code ");Serial.print(tmp, HEX);Serial.print("\n"); }}
+          msgout = MESSAGE_REJECT;
+          NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_ATN);
+          break;
+        } /* switch (tmp) */
+        break;
+      case PHASE_MSGOUT:
+        len = 1;
+        data = &msgout;
+        //hostdata->last_message = msgout;
+        NCR5380_transfer_pio(&phase, &len, &data);
+        if (msgout == ABORT) {
+          //hostdata->connected = NULL;
+          //hostdata->busy[scmd_id(cmd)] &= ~(1 << cmd->device->lun);
+          //cmd->result = DID_ERROR << 16;
+          //complete_cmd(instance, cmd);
+          //maybe_release_dma_irq(instance);
+          return;
+        }
+        msgout = NOP;
+        break;
+      case PHASE_CMDOUT:
+        //len = cmd->cmd_len;
+        //data = cmd->cmnd;
+        //XXX for performance reasons, on machines with a PSEUDO-DMA architecture we should probably use the dma transfer function.
+        //NCR5380_transfer_pio(&phase, &len, &data);
+        break;
+      case PHASE_STATIN:
+        len = 1;
+        data = &tmp;
+        NCR5380_transfer_pio(&phase, &len, &data);
+        //cmd->SCp.Status = tmp;
+        break;
+      default:
+        if (loggingEnabled) { Serial.print("unknown phase\n"); }
+        //NCR5380_dprint(NDEBUG_ANY, instance);
+      } /* switch(phase) */
+    } else {
+      //spin_unlock_irq(&hostdata->lock);
+      NCR5380_poll_politely(STATUS_REG, SR_REQ, SR_REQ);
+      //spin_lock_irq(&hostdata->lock);
+    }
+  }
+}
+
