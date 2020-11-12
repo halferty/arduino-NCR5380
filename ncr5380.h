@@ -78,12 +78,13 @@ class NCR5380 {
 	    int scsiId = 7;
 	    void NCR5380_write(byte, byte);
 	    byte NCR5380_read(byte);
-	    bool arbitrate();
-	    bool select(int);
+	    bool NCR5380_arbitrate();
+	    bool NCR5380_select(int);
 	    bool NCR5380_poll_politely(int, byte, byte);
 	    bool NCR5380_poll_politely2(int, byte, byte, int, byte, byte);
 	    bool NCR5380_transfer_pio(byte *, int *, byte **);
 	    bool NCR5380_command(byte *, int);
+	    bool NCR5380_data_in(byte *, int);
 };
 
 #endif

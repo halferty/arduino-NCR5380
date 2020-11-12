@@ -44,7 +44,7 @@ bool NCR5380::NCR5380_poll_politely2(int reg1, byte bit1, byte val1, int reg2, b
   return false;
 }
 
-bool NCR5380::arbitrate() {
+bool NCR5380::NCR5380_arbitrate() {
   if (loggingEnabled) { Serial.print("Trying to arbitrate. ID=");Serial.print(scsiId);Serial.print("\n"); }
   //Set the phase bits to 0, otherwise the NCR5380 won't drive the data bus during SELECTION.
   NCR5380_write(TARGET_COMMAND_REG, 0);
@@ -72,7 +72,7 @@ bool NCR5380::arbitrate() {
 }
 
 // Should be called right after arbitrate()
-bool NCR5380::select(int targetId) {
+bool NCR5380::NCR5380_select(int targetId) {
   //Start selection process, asserting the host and target ID's on the SCSI bus
   NCR5380_write(OUTPUT_DATA_REG, ID_MASK | (1 << targetId));
   //Raise ATN while SEL is true before BSY goes false from arbitration, since this is the only way to guarantee that
@@ -132,13 +132,37 @@ void NCR5380::begin() {
     CLEAR_INTERRUPT_CONDITIONS();
 }
 
+// int DataIn(BYTE *buf, int length)
+// {
+//   // フェーズ待ち
+//   if (!WaitPhase(BUS::datain)) {
+//     return -1;
+//   }
+
+//   // データ受信
+//   return bus.ReceiveHandShake(buf, length);
+// }
+
+bool NCR5380::NCR5380_data_in(byte *buf, int count) {
+  // Wait for data in phase
+  byte phase = 0;
+  do {
+    phase = NCR5380_read(STATUS_REG) & PHASE_MASK;
+  } while (phase != PHASE_DATAIN);
+  //while (NCR5380_read(STATUS_REG) & PHASE_MASK != PHASE_DATAIN) {}
+  int c = count;
+  //byte phase = NCR5380_read(STATUS_REG) & PHASE_MASK;
+  NCR5380_transfer_pio(&phase, &c, &buf);
+  return (c == 0);
+}
+
 void NCR5380::test() {//NCR5380_main
-  bool ok = arbitrate();
+  bool ok = NCR5380_arbitrate();
   if (!ok) {
     Serial.print("arbitrate()=");Serial.print(ok);Serial.print("\n");
     return;
   }
-  ok = select(5);
+  ok = NCR5380_select(5);
   if (!ok) {
     Serial.print("select()=");Serial.print(ok);Serial.print("\n");
     return;
@@ -151,13 +175,30 @@ void NCR5380::test() {//NCR5380_main
   mm[4] = 0xff;
   mm[5] = 0;
   byte *b = mm;
-  // ok = NCR5380_information_transfer(5, 0, &b);
   ok = NCR5380_command(b, 6);
   if (!ok) {
-    // Serial.print("NCR5380_information_transfer()=");Serial.print(ok);Serial.print("\n");
-    Serial.print("NCR5380_information_transfer()=");Serial.print(ok);Serial.print("\n");
+    Serial.print("NCR5380_command()=");Serial.print(ok);Serial.print("\n");
     return;
   }
+  byte buf[256];
+  for (int i = 0; i < 256; i++) {
+    buf[i] = 0;
+  }
+  ok = NCR5380_data_in(buf, 256);
+  if (!ok) {
+    Serial.print("NCR5380_data_in()=");Serial.print(ok);Serial.print("\n");
+    //return;
+  }
+  Serial.print("------------");
+  for (int i = 0; i < 256; i++) {
+    char x = buf[i];
+    Serial.print(x);
+    Serial.print(" ");
+    if (i % 8 == 0) {
+      Serial.print("\n");
+    }
+  }
+  Serial.print("============");
 }
 
 bool NCR5380::NCR5380_transfer_pio(byte *phase, int *count, byte **data) {
@@ -221,6 +262,12 @@ bool NCR5380::NCR5380_transfer_pio(byte *phase, int *count, byte **data) {
 }
 
 bool NCR5380::NCR5380_command(byte *buf, int count) {
+  int c = count;
   byte phase = NCR5380_read(STATUS_REG) & PHASE_MASK;
-  NCR5380_transfer_pio(&phase, &count, &buf);
+  NCR5380_transfer_pio(&phase, &c, &buf);
+  return (c == 0);
 }
+
+// bool NCR5380::NCR5380_inquiry(int id, byte *buf) {
+
+// }
