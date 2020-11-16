@@ -31,12 +31,13 @@ void setup() {
   ncr->begin();
   ncr->setLoggingEnabled(true);
   delay(100);
-  ncr->test();
 }
 
 void loop() {
+  Serial.write("++++++++++++++++SLEEPING++++++++++++++++\n");
   delay(100);
-  Serial.write("--------");
-  byte res = ncr->readCurrentScsiDataReg();
-  Serial.println(res, HEX);
+//  Serial.write("--------");
+//  byte res = ncr->readCurrentScsiDataReg();
+//  Serial.println(res, HEX);
+  ncr->test();
 }

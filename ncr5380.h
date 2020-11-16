@@ -44,47 +44,49 @@ digitalWrite(_d6, (x >> 6) & 0x01);digitalWrite(_d7, (x >> 7) & 0x01);
 #define ID_MASK 1 << scsiId
 #define ID_HIGHER_MASK 0b11111111 << scsiId + 1
 
-
 class NCR5380 {
-	public:
-		NCR5380(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int);
-		void begin();
-		byte readCurrentScsiDataReg();
-		void setLoggingEnabled(bool);
-		void setScsiId(int);
-		void test();
-	private:
-    	int _cs_;
-	    int _drq;
-	    int _irq;
-	    int _ior_;
-	    int _ready;
-	    int _dack_;
-	    int _eop_;
-	    int _reset_;
-	    int _iow_;
-	    int _a0;
-	    int _a1;
-	    int _a2;
-	    int _d0;
-	    int _d1;
-	    int _d2;
-	    int _d3;
-	    int _d4;
-	    int _d5;
-	    int _d6;
-	    int _d7;
-	    bool loggingEnabled = false;
-	    int scsiId = 7;
-	    void NCR5380_write(byte, byte);
-	    byte NCR5380_read(byte);
-	    bool NCR5380_arbitrate();
-	    bool NCR5380_select(int);
-	    bool NCR5380_poll_politely(int, byte, byte);
-	    bool NCR5380_poll_politely2(int, byte, byte, int, byte, byte);
-	    bool NCR5380_transfer_pio(byte *, int *, byte **);
-	    bool NCR5380_command(byte *, int);
-	    bool NCR5380_data_in(byte *, int);
+public:
+    NCR5380(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int);
+    void begin();
+    byte readCurrentScsiDataReg();
+    void setLoggingEnabled(bool);
+    void setScsiId(int);
+    void test();
+private:
+    int _cs_;
+    int _drq;
+    int _irq;
+    int _ior_;
+    int _ready;
+    int _dack_;
+    int _eop_;
+    int _reset_;
+    int _iow_;
+    int _a0;
+    int _a1;
+    int _a2;
+    int _d0;
+    int _d1;
+    int _d2;
+    int _d3;
+    int _d4;
+    int _d5;
+    int _d6;
+    int _d7;
+    bool loggingEnabled = false;
+    int scsiId = 7;
+    void NCR5380_write(byte, byte);
+    byte NCR5380_read(byte);
+    bool NCR5380_arbitrate();
+    bool NCR5380_select(int);
+    bool NCR5380_poll_politely(int, byte, byte);
+    bool NCR5380_poll_politely2(int, byte, byte, int, byte, byte);
+    bool NCR5380_transfer_pio(byte *, int *, byte **);
+    bool NCR5380_command(byte *, int);
+    bool NCR5380_data_in(byte *, int);
+    int NCR5380_data_in_variable_length(byte *, int);
+    bool NCR5380_inquiry(int, byte *, int *);
+    void NCR5380_wait_phase(byte);
 };
 
 #endif

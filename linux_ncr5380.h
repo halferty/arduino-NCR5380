@@ -21,6 +21,8 @@
 #define ICR_ASSERT_ATN    0x02  /* rw Set to assert ATN */
 #define ICR_ASSERT_DATA   0x01  /* rw SCSI_DATA_REG is asserted */
 
+#define ICR_BASE 0
+
 #define MODE_REG    2
 //Note : BLOCK_DMA code will keep DRQ asserted for the duration of the 
 //transfer, causing the chip to hog the bus. You probably don't want this.
