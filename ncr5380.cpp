@@ -12,6 +12,8 @@ NCR5380::NCR5380(int cs_, int drq, int irq, int ior_, int ready, int dack_, int 
 
 void NCR5380::setLoggingEnabled(bool x) { loggingEnabled = x; }
 
+void NCR5380::setVerboseLoggingEnabled(bool x) { verboseLoggingEnabled = x; }
+
 void NCR5380::setScsiId(int x) { scsiId = x; }
 
 void NCR5380::NCR5380_write(byte addr, byte data) {
@@ -149,6 +151,14 @@ int NCR5380::NCR5380_data_in_variable_length(byte *buf, int count) {
   return c;
 }
 
+byte NCR5380::NCR5380_wait_phase(byte phase) {
+  byte _phase = 0;
+  do {
+    _phase = NCR5380_read(STATUS_REG) & PHASE_MASK;
+  } while (_phase != phase);
+  return _phase;
+}
+
 bool NCR5380::NCR5380_inquiry(int scsiId, byte *buf, int *count) {
   bool ok = NCR5380_arbitrate();
   if (!ok) {
@@ -179,8 +189,33 @@ bool NCR5380::NCR5380_inquiry(int scsiId, byte *buf, int *count) {
     if (loggingEnabled) { Serial.print("NCR5380_data_in_variable_length() len zero!\n"); }
     return false;
   }
+  inquiryResult.peripheralQualifier = buf[0] >> 5;
+  inquiryResult.deviceTypeCode = buf[0] & 0x1F;
+  inquiryResult.removableMediaBit = (buf[1] >> 7) & 1;
+  inquiryResult.ansiScsiVersion = buf[2] & 0x07;
+  inquiryResult.additionnalDataLength = buf[4];
+  for (int i = 0; i < 8; i++) {
+    inquiryResult.vendorIdStr[i] = buf[8 + i];
+  }
+  inquiryResult.vendorIdStr[8] = 0;
+  for (int i = 0; i < 16; i++) {
+    inquiryResult.productIdStr[i] = buf[16 + i];
+  }
+  inquiryResult.productIdStr[16] = 0;
+  for (int i = 0; i < 4; i++) {
+    inquiryResult.productRevStr[i] = buf[32 + i];
+  }
+  inquiryResult.productRevStr[4] = 0;
+  for (int i = 0; i < 20; i++) {
+    inquiryResult.vendorSpecificInfoStr[i] = buf[36 + i];
+  }
+  inquiryResult.vendorSpecificInfoStr[20] = 0;
+  for (int i = 0; i < inquiryResult.additionnalDataLength; i++) {
+    inquiryResult.vendorSpecificData[i] = buf[96 + i];
+  }
+  inquiryResult.vendorSpecificData[inquiryResult.additionnalDataLength] = 0;
   if (loggingEnabled) {
-    Serial.print("---START INQUIRY RESULT-----");
+    Serial.print("---START INQUIRY RESULT RAW-----\n");
     for (int i = 0; i < len; i++) {
       char x = buf[i];
       Serial.print(x);
@@ -189,14 +224,53 @@ bool NCR5380::NCR5380_inquiry(int scsiId, byte *buf, int *count) {
         Serial.print("\n");
       }
     }
-    Serial.print("---END INQUIRY RESULT-----");
+    Serial.print("\n---END INQUIRY RESULT RAW-----\n");
+    Serial.print("---START INQUIRY RESULT PARSED-----\n");
+    Serial.print("Peripheral qualifier: (which LUN is actually connected) ");Serial.print(inquiryResult.peripheralQualifier);Serial.print("\n");
+    Serial.print("Device type code: ");Serial.print(inquiryResult.deviceTypeCode);Serial.print("\n");
+    switch(inquiryResult.deviceTypeCode) {
+      case 0x00:
+        Serial.print("(Direct access device (disk drive))\n");
+        break;
+      case 0x01:
+        Serial.print("(Sequential access device (tape drive))\n");
+        break;
+      case 0x02:
+        Serial.print("(Printer device)\n");
+        break;
+      case 0x03:
+        Serial.print("(Processor device)\n");
+        break;
+      case 0x04:
+        Serial.print("(Write-once device (WORM drive))\n");
+        break;
+      case 0x05:
+        Serial.print("(CD-ROM device)\n");
+        break;
+      case 0x06:
+        Serial.print("(Scanner device)\n");
+        break;
+      case 0x07:
+        Serial.print("(Optical memory device (optical disk drive))\n");
+        break;
+      case 0x08:
+        Serial.print("(Medium changer device (jukebox))\n");
+        break;
+      default:
+        Serial.print("(Unknown device type)\n");
+    }
+    Serial.print("Removable media device? ");if (inquiryResult.removableMediaBit) { Serial.print("yes\n"); } else { Serial.print("no\n"); }
+    Serial.print("Highest SCSI version supported: ");Serial.print(inquiryResult.ansiScsiVersion);Serial.print("\n");
+    Serial.print("Additional data length: ");Serial.print(inquiryResult.additionnalDataLength);Serial.print("\n");
+    Serial.print("Vendor ID string: ");Serial.print(inquiryResult.vendorIdStr);Serial.print("\n");
+    Serial.print("Product ID string: ");Serial.print(inquiryResult.productIdStr);Serial.print("\n");
+    Serial.print("Product revision string: ");Serial.print(inquiryResult.productRevStr);Serial.print("\n");
+    Serial.print("Vendor-specific info string: ");Serial.print(inquiryResult.vendorSpecificInfoStr);Serial.print("\n");
+    Serial.print("---END INQUIRY RESULT PARSED-----\n");
   }
   *count = len;
   // Wait for status phase
-  byte phase = 0;
-  do {
-    phase = NCR5380_read(STATUS_REG) & PHASE_MASK;
-  } while (phase != PHASE_STATIN);
+  byte phase = NCR5380_wait_phase(PHASE_STATIN);
   // Get status
   len = 1;
   byte data[2];
@@ -204,10 +278,7 @@ bool NCR5380::NCR5380_inquiry(int scsiId, byte *buf, int *count) {
   NCR5380_transfer_pio(&phase, &len, &dd);
   if (loggingEnabled) { Serial.print("Inquiry status = ");Serial.print(data[0]);Serial.print("\n"); }
   // Wait for message phase
-  phase = 0;
-  do {
-    phase = NCR5380_read(STATUS_REG) & PHASE_MASK;
-  } while (phase != PHASE_MSGIN);
+  phase = NCR5380_wait_phase(PHASE_MSGIN);
   // Get message
   len = 1;
   byte data2[2];
@@ -258,7 +329,7 @@ bool NCR5380::NCR5380_transfer_pio(byte *phase, int *count, byte **data) {
   NCR5380_write(TARGET_COMMAND_REG, PHASE_SR_TO_TCR(p));
   do {// Wait for assertion of REQ, after which the phase bits will be valid
     if (!NCR5380_poll_politely(STATUS_REG, SR_REQ, SR_REQ)) break;
-    if (loggingEnabled) { Serial.print("REQ asserted\n"); }
+    if (verboseLoggingEnabled) { Serial.print("REQ asserted\n"); }
     byte statusRegPhase = NCR5380_read(STATUS_REG) & PHASE_MASK;
     if (statusRegPhase != p) { //Check for phase mismatch
       if (loggingEnabled) {
@@ -287,7 +358,7 @@ bool NCR5380::NCR5380_transfer_pio(byte *phase, int *count, byte **data) {
       NCR5380_write(INITIATOR_COMMAND_REG, ICR_ASSERT_ACK);
     }
     if (!NCR5380_poll_politely(STATUS_REG, SR_REQ, 0)) break;
-    if (loggingEnabled) { Serial.print("REQ negated, handshake complete\n"); }
+    if (verboseLoggingEnabled) { Serial.print("REQ negated, handshake complete\n"); }
     //We have several special cases to consider during REQ/ACK handshaking :
     //1.  We were in MSGOUT phase, and we are on the last byte of the message.  ATN must be dropped as ACK is dropped.
     //2.  We are in a MSGIN phase, and we are on the last byte of the message.  We must exit with ACK asserted, so that

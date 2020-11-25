@@ -44,14 +44,31 @@ digitalWrite(_d6, (x >> 6) & 0x01);digitalWrite(_d7, (x >> 7) & 0x01);
 #define ID_MASK 1 << scsiId
 #define ID_HIGHER_MASK 0b11111111 << scsiId + 1
 
+// This doesn't cover all inquiry result data, just the fields I thought people would care about. Please add the rest
+// if you need them!
+struct InquiryData {
+    int peripheralQualifier;
+    int deviceTypeCode;
+    bool removableMediaBit;
+    int ansiScsiVersion;
+    int additionnalDataLength;
+    char vendorIdStr[9];
+    char productIdStr[17];
+    char productRevStr[5];
+    char vendorSpecificInfoStr[21];
+    char vendorSpecificData[128];
+};
+
 class NCR5380 {
 public:
     NCR5380(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int);
     void begin();
     byte readCurrentScsiDataReg();
     void setLoggingEnabled(bool);
+    void setVerboseLoggingEnabled(bool);
     void setScsiId(int);
     void test();
+    InquiryData inquiryResult;
 private:
     int _cs_;
     int _drq;
@@ -74,6 +91,7 @@ private:
     int _d6;
     int _d7;
     bool loggingEnabled = false;
+    bool verboseLoggingEnabled = false;
     int scsiId = 7;
     void NCR5380_write(byte, byte);
     byte NCR5380_read(byte);
@@ -86,7 +104,7 @@ private:
     bool NCR5380_data_in(byte *, int);
     int NCR5380_data_in_variable_length(byte *, int);
     bool NCR5380_inquiry(int, byte *, int *);
-    void NCR5380_wait_phase(byte);
+    byte NCR5380_wait_phase(byte);
 };
 
 #endif
