@@ -159,7 +159,10 @@ byte NCR5380::NCR5380_wait_phase(byte phase) {
   return _phase;
 }
 
-bool NCR5380::NCR5380_inquiry(int scsiId, byte *buf, int *count) {
+bool NCR5380::NCR5380_inquiry(int scsiId) {
+  byte buf[256];
+  for (int i = 0; i < 256; i++) { buf[0] = 0; }
+  int count = 0;
   bool ok = NCR5380_arbitrate();
   if (!ok) {
     if (loggingEnabled) { Serial.print("arbitrate()=");Serial.print(ok);Serial.print("\n"); }
@@ -268,7 +271,7 @@ bool NCR5380::NCR5380_inquiry(int scsiId, byte *buf, int *count) {
     Serial.print("Vendor-specific info string: ");Serial.print(inquiryResult.vendorSpecificInfoStr);Serial.print("\n");
     Serial.print("---END INQUIRY RESULT PARSED-----\n");
   }
-  *count = len;
+  count = len;
   // Wait for status phase
   byte phase = NCR5380_wait_phase(PHASE_STATIN);
   // Get status
@@ -310,10 +313,7 @@ bool NCR5380::NCR5380_inquiry(int scsiId, byte *buf, int *count) {
 }
 
 void NCR5380::test() {
-  byte buf[256];
-  for (int i = 0; i < 256; i++) { buf[0] = 0; }
-  int count = 0;
-  bool ok = NCR5380_inquiry(5, &(buf[0]), &count);
+  bool ok = NCR5380_inquiry(5);
   if (!ok) {
     Serial.print("NCR5380_inquiry()=");Serial.print(ok);Serial.print("\n");
     return;

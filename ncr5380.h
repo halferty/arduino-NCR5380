@@ -103,7 +103,7 @@ private:
     bool NCR5380_command(byte *, int);
     bool NCR5380_data_in(byte *, int);
     int NCR5380_data_in_variable_length(byte *, int);
-    bool NCR5380_inquiry(int, byte *, int *);
+    bool NCR5380_inquiry(int);
     byte NCR5380_wait_phase(byte);
 };
 
